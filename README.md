@@ -362,8 +362,8 @@ gradle test
 
 [MIT](LICENSE) © kbmp
 
-本插件的源码仓库：<https://github.com/kbmp/halo-plugin-api-gallery>
-问题反馈：<https://github.com/kbmp/halo-plugin-api-gallery/issues>
+本插件的源码仓库：<https://github.com/lu7875/halo-plugin-api-gallery>
+问题反馈：<https://github.com/lu7875/halo-plugin-api-gallery/issues>
 
 > **AI 使用声明**：本项目在开发过程中使用了 AI 辅助编码（AI-substantial）。
 > 提交上架前已由开发者对权限边界、对外 HTTP 请求、诊断接口脱敏与上架材料做人工复查，
