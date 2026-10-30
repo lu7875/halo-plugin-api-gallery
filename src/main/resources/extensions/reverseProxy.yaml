@@ -1,0 +1,12 @@
+apiVersion: plugin.halo.run/v1alpha1
+kind: ReverseProxy
+metadata:
+  # 名称带插件前缀，避免与其它插件冲突
+  name: api-gallery-static-proxy
+rules:
+  # 代理 src/main/resources/static 目录下的全部文件；
+  # 声明后访问地址为 /plugins/api-gallery/assets/static/{文件名}
+  # 注意：Halo 不会自动暴露插件的 static 目录，必须通过这个模型代理出去
+  - path: /static/**
+    file:
+      directory: static

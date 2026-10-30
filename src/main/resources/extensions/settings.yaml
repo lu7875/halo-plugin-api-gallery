@@ -1,0 +1,128 @@
+apiVersion: v1alpha1
+kind: Setting
+metadata:
+  name: api-gallery-settings
+spec:
+  forms:
+    - group: sources
+      label: API 数据源
+      formSchema:
+        - $formkit: repeater
+          name: sources
+          label: 数据源列表
+          help: "新增一行即新增一个图源，保存后插件会立即拉取，无需重启。"
+          value: []
+          min: 0
+          children:
+            - $formkit: text
+              name: name
+              label: 名称
+              help: "展示用，例如「派次元」"
+              validation: required
+            - $formkit: text
+              name: apiUrl
+              label: API 地址
+              help: "返回图片列表的接口地址，例如 https://t.paiii.cn/api/list"
+              validation: required
+            - $formkit: select
+              name: parser
+              label: 响应结构
+              value: auto
+              options:
+                - label: 自动识别（推荐）
+                  value: auto
+                - label: 顶层是数组
+                  value: array
+                - label: 对象里的 items 字段
+                  value: items
+                - label: 单个图片对象（随机图接口）
+                  value: random
+                - label: 302 跳转到随机图片（无列表接口）
+                  value: redirect
+                - label: 随机单张 JSON（每次返回不一样的图）
+                  value: random-json
+            - $formkit: number
+              name: sampleCount
+              label: 采样次数
+              help: "仅后两种随机类型需要：每次同步请求多少次，越多攒到的图越多。默认 30，上限 200。"
+              value: 30
+              min: 1
+            - $formkit: number
+              name: maxItems
+              label: 最多累积
+              help: "仅后两种随机类型需要：该图源最多累积多少张，防止图库无限膨胀。默认 200，上限 5000。"
+              value: 200
+              min: 1
+            - $formkit: text
+              name: urlField
+              label: 图片地址字段
+              help: "留空自动识别 url / imageUrl / src 等；302 跳转类型不用填"
+            - $formkit: text
+              name: idField
+              label: 唯一标识字段
+              help: "留空自动识别 id / uid 等"
+            - $formkit: text
+              name: titleField
+              label: 标题字段
+              help: "留空自动识别 title / name 等"
+            - $formkit: text
+              name: tagsField
+              label: 标签字段
+              help: "留空自动识别 tags"
+            - $formkit: switch
+              name: enabled
+              label: 启用该数据源
+              value: true
+    - group: basic
+      label: 同步设置
+      formSchema:
+        - $formkit: number
+          name: syncIntervalMinutes
+          label: 同步周期（分钟）
+          help: "定时重新拉取各数据源的素材，默认 60 分钟，最小 5 分钟。保存后立刻按新周期生效，不用重启插件。"
+          value: 60
+          min: 5
+        - $formkit: text
+          name: syncTip
+          label: 关于「图没变」
+          value: "固定列表类图源（如 /api/list）每次返回的内容完全一样，同步多少次都是那批图，这是正常的。想要素材有变化，请用随机类型的图源。"
+        - $formkit: switch
+          name: pushToPhotos
+          label: 同步到「图库管理」插件
+          help: "把图片地址写成图库的 Photo 记录，在后台 /console/photos 和主题 /photos 页面显示。只写地址不存文件，不占存储；关闭后可一键撤回。"
+          value: true
+        - $formkit: text
+          name: proxyHost
+          label: HTTP 代理地址
+          help: "服务器无法直连图源时填写，例如 127.0.0.1。留空则尝试 JVM 系统代理属性，再不行就直连。"
+        - $formkit: number
+          name: proxyPort
+          label: HTTP 代理端口
+          help: "配合上面地址使用，例如 7890"
+          min: 1
+        - $formkit: text
+          name: photoGroupName
+          label: 图库分组名
+          help: "留空则按数据源名自动分组；填写则所有图片归入同一个分组。"
+        - $formkit: switch
+          name: allowAnonymous
+          label: 允许访客查看图库
+          help: "Halo 的 /apis 接口默认需要登录。开启后插件会自动给匿名用户只读权限，前台页面才能展示；关闭则只有登录用户可访问。"
+          value: true
+        - $formkit: text
+          name: note
+          label: 说明
+          value: "图片仅缓存地址等元数据，不下载到本站，不占用存储。"
+    - group: about
+      label: 关于
+      formSchema:
+        - $formkit: text
+          name: authorBlog
+          label: 作者博客
+          value: "https://blog.kbmp.club"
+          help: "使用问题、功能建议或图源推荐，可到作者博客留言交流。"
+        - $formkit: text
+          name: authorName
+          label: 作者
+          value: "kbmp"
+          help: "本插件由 kbmp 开发并维护，遵循 MIT 协议开源。"

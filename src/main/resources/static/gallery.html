@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>图库</title>
+<style>
+  :root{--bg:#0f1115;--card:#181b22;--line:#262b36;--txt:#e6e8ee;--dim:#8b93a7;--accent:#b8ec3f;--accent-ink:#1a1f0a}
+  @media (prefers-color-scheme:light){:root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ee;--txt:#1b1f27;--dim:#6b7280;--accent:#7cb518;--accent-ink:#fff}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1400px;margin:0 auto;padding:0 20px 60px}
+  header{position:sticky;top:0;z-index:30;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 0 12px;margin-bottom:18px}
+  h1{margin:0;font-size:19px}
+  .sub{margin-top:4px;color:var(--dim);font-size:12px}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
+  select,button{background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:9px;padding:8px 14px;font-size:13px;font-family:inherit;cursor:pointer}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  .grow{flex:1}
+  .stat{color:var(--dim);font-size:12px}.stat b{color:var(--txt)}
+  #msg{color:var(--dim);font-size:12px;min-height:18px;margin-top:8px}.err{color:#ff6b6b}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+  .cell{position:relative;border:1px solid var(--line);border-radius:11px;overflow:hidden;cursor:zoom-in;background:var(--card);aspect-ratio:3/4}
+  .cell img{width:100%;height:100%;object-fit:cover;display:block;opacity:0;transition:opacity .35s}
+  .cell img.in{opacity:1}
+  .cell .cap{position:absolute;left:0;right:0;bottom:0;padding:16px 9px 6px;font-size:11px;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.8));opacity:0;transition:.2s;pointer-events:none}
+  .cell:hover .cap{opacity:1}
+  .lb{position:fixed;inset:0;z-index:100;display:none;place-items:center;background:rgba(0,0,0,.88);padding:24px}
+  .lb.on{display:grid}
+  .lb img{max-width:94vw;max-height:86vh;border-radius:8px}
+  .lb .x{position:absolute;top:18px;right:20px;background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.3)}
+  footer{margin-top:30px;padding-top:14px;border-top:1px solid var(--line);color:var(--dim);font-size:12px}
+  code{background:rgba(125,125,125,.16);padding:2px 6px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>图库</h1>
+    <div class="sub">图片由第三方图源提供，<b>不占用本站存储</b></div>
+    <div class="bar">
+      <select id="src"><option value="">全部数据源</option></select>
+      <button id="reload">刷新</button>
+      <button id="rand">随机一张</button>
+      <span class="grow"></span>
+      <span class="stat" id="stat">加载中…</span>
+    </div>
+    <div id="msg"></div>
+  </header>
+  <div class="grid" id="grid"></div>
+  <footer>接口 <code id="apiTip"></code> · 数据源在 Halo 后台「插件 → API 图库 → 设置」中配置</footer>
+</div>
+
+<div class="lb" id="lb"><img id="lbImg" src="" alt=""><button class="x" id="lbX">关闭 ✕</button></div>
+
+<script>
+(function(){
+  // ===== 可改：插件接口基址（同域部署无需修改）=====
+  var BASE = '/apis/api.gallery.halo.run/v1alpha1';
+
+  document.getElementById('apiTip').textContent = BASE + '/items';
+  var grid=document.getElementById('grid'), msg=document.getElementById('msg'),
+      stat=document.getElementById('stat'), lb=document.getElementById('lb'),
+      lbImg=document.getElementById('lbImg'), sel=document.getElementById('src');
+  var cur=[], page=1, size=48, loading=false, done=false;
+
+  function say(t,e){msg.textContent=t||'';msg.className=e?'err':'';}
+
+  function cellOf(it){
+    var d=document.createElement('div');d.className='cell';
+    var im=document.createElement('img');im.loading='lazy';
+    im.onload=function(){im.classList.add('in');};
+    im.src=it.url;im.alt=it.title||'';
+    im.onerror=function(){d.remove();};
+    d.appendChild(im);
+    var c=document.createElement('div');c.className='cap';
+    c.textContent=(it.title||'')+(it.source?(' · '+it.source):'');
+    d.appendChild(c);
+    d.onclick=function(){lbImg.src=it.url;lb.classList.add('on');};
+    return d;
+  }
+
+  function render(list,append){
+    if(!append) grid.innerHTML='';
+    var f=document.createDocumentFragment();
+    list.forEach(function(it){f.appendChild(cellOf(it));});
+    grid.appendChild(f);
+  }
+
+  function load(append){
+    if(loading||done) return;
+    loading=true;
+    var q=BASE+'/items?page='+page+'&size='+size+(sel.value?('&source='+encodeURIComponent(sel.value)):'');
+    fetch(q).then(function(r){return r.json();}).then(function(d){
+      var items=d.items||[];
+      render(items,append);
+      cur=cur.concat(items);
+      addSourceOptions(items);
+      stat.innerHTML='共 <b>'+(d.total||0)+'</b> 张 · 已显示 <b>'+cur.length+'</b> · 同步于 '+(d.lastSync?d.lastSync.slice(0,19).replace('T',' '):'—');
+      page++;
+      done=cur.length>=(d.total||0);
+      say(done&&(d.total||0)===0?'还没有数据，请先在后台配置数据源并等待同步。':'');
+    }).catch(function(e){say('加载失败：'+e.message,true);}).then(function(){loading=false;});
+  }
+
+  // 只用公开的 /items 数据推导来源列表，不请求需要授权的管理接口
+  var knownSources={};
+  function addSourceOptions(list){
+    (list||[]).forEach(function(it){
+      var s=it&&it.source;
+      if(s&&!knownSources[s]){
+        knownSources[s]=1;
+        var o=document.createElement('option');
+        o.value=s;o.textContent=s;
+        sel.appendChild(o);
+      }
+    });
+  }
+
+  sel.onchange=function(){page=1;cur=[];done=false;load(false);};
+  document.getElementById('reload').onclick=function(){page=1;cur=[];done=false;load(false);};
+  document.getElementById('rand').onclick=function(){
+    fetch(BASE+'/random'+(sel.value?('?source='+encodeURIComponent(sel.value)):'')).then(function(r){return r.json();})
+      .then(function(d){ if(d.item){lbImg.src=d.item.url;lb.classList.add('on');} else say(d.message||'暂无数据',true); })
+      .catch(function(e){say('获取失败：'+e.message,true);});
+  };
+  document.getElementById('lbX').onclick=function(){lb.classList.remove('on');};
+  lb.onclick=function(e){if(e.target===lb)lb.classList.remove('on');};
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')lb.classList.remove('on');});
+
+  window.addEventListener('scroll',function(){
+    if(window.innerHeight+window.scrollY>document.body.offsetHeight-800) load(true);
+  });
+
+  load(false);
+})();
+</script>
+</body>
+</html>

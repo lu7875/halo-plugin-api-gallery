@@ -1,0 +1,56 @@
+plugins {
+    id 'java'
+    id 'run.halo.plugin.devtools' version '0.8.0'
+}
+
+group 'io.kbmp'
+version '1.4.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://repo.spring.io/release' }
+    maven { url 'https://repo.spring.io/milestone' }
+}
+
+dependencies {
+    compileOnly 'run.halo.app:api:2.27.1'
+
+    compileOnly 'org.projectlombok:lombok:1.18.34'
+    annotationProcessor 'org.projectlombok:lombok:1.18.34'
+
+    testImplementation 'run.halo.app:api:2.27.1'
+    testImplementation 'org.projectlombok:lombok:1.18.34'
+    testAnnotationProcessor 'org.projectlombok:lombok:1.18.34'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    // Halo 2.27 的 API 由 Java 21 编译（class 版本 65），测试 JVM 必须 21+
+    // 编译仍按 17 字节码输出，插件在 Java 21 的 Halo 上正常运行
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    })
+}
+
+halo {
+    version = '2.27.1'
+}
+
+tasks.named('jar') {
+    manifest {
+        attributes 'Implementation-Title': 'api-gallery',
+                   'Implementation-Version': project.version
+    }
+    // 把许可证文件一并打进制品，便于核验开源声明
+    from(rootDir) {
+        include 'LICENSE'
+        into ''
+    }
+}

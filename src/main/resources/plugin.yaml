@@ -1,0 +1,21 @@
+apiVersion: plugin.halo.run/v1alpha1
+kind: Plugin
+metadata:
+  name: api-gallery
+spec:
+  displayName: "API 图库"
+  version: 1.4.0
+  requires: ">=2.20.0"
+  author:
+    name: kbmp
+    website: https://blog.kbmp.club
+  logo: logo.svg
+  homepage: https://blog.kbmp.club
+  repo: https://github.com/kbmp/halo-plugin-api-gallery
+  issues: https://github.com/kbmp/halo-plugin-api-gallery/issues
+  description: "接入外部图片 API，在前台实时展示图库资源；图片只存地址不落本地存储，支持多数据源、定时同步与滚动更新。"
+  license:
+    - name: "MIT"
+      url: "https://opensource.org/licenses/MIT"
+  settingName: api-gallery-settings
+  configMapName: api-gallery-config
