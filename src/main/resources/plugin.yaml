@@ -4,13 +4,13 @@ metadata:
   name: api-gallery
 spec:
   displayName: "API 图库"
-  version: 1.4.0
+  version: 1.4.1
   requires: ">=2.20.0"
   author:
     name: kbmp
-    website: https://blog.kbmp.club
+    website: https://github.com/lu7875
   logo: logo.svg
-  homepage: https://blog.kbmp.club
+  homepage: https://github.com/lu7875/halo-plugin-api-gallery
   repo: https://github.com/lu7875/halo-plugin-api-gallery
   issues: https://github.com/lu7875/halo-plugin-api-gallery/issues
   description: "接入外部图片 API，在前台实时展示图库资源；图片只存地址不落本地存储，支持多数据源、定时同步与滚动更新。"

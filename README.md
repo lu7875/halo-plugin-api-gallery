@@ -3,7 +3,7 @@
 Halo 2.x 插件。在后台配置任意**图片 API 地址**，插件定时拉取素材并在前端展示。
 **图片只缓存地址等元数据，文件始终由第三方图源提供，不下载、不写入附件库，不占用本地存储。**
 
-> 当前版本 **1.4.0**。从旧版升级请看 [十、常见问题](#十常见问题) 里的接口路径迁移说明。
+> 当前版本 **1.4.1**。从旧版升级请看 [十、常见问题](#十常见问题) 里的接口路径迁移说明。
 
 ## 一、安全设计
 
@@ -26,6 +26,17 @@ Halo 2.x 插件。在后台配置任意**图片 API 地址**，插件定时拉�
 | DNS 解析 | 域名解析后的**每一个** A / AAAA 记录都要过网段检查，防止 DNS rebinding 与域名指向内网 |
 
 校验在**每次请求前**执行（不是只在保存配置时校验），所以后台改完配置、DNS 后续被劫持也会被拦。
+
+### 1.1 跳转目标逐跳校验（1.4.1 新增）
+
+只校验初始地址不够：如果图源返回 302/307，把 `Location` 指向内网、回环或云元数据地址，
+HTTP 客户端的自动跟随就会绕过上面的校验。因此 1.4.1 起：
+
+- 所有对外请求一律**关闭自动跟随跳转**（`Redirect.NEVER`）；
+- 需要跨跳转的请求改为**手动逐跳跟随**，每一跳跳转前都对目标地址重新执行完整的
+  「协议 + 主机 + DNS 解析 IP」校验，跳转目标必须同样是公网 http/https 地址；
+- 限制最大 5 跳，防止重定向循环；
+- `Location` 支持相对路径与协议相对路径（基于当前地址解析后再校验）。
 
 ### 2. 接口权限边界（1.4.0 收紧）
 
@@ -71,7 +82,7 @@ Halo 2.x 插件。在后台配置任意**图片 API 地址**，插件定时拉�
 
 ## 三、安装
 
-1. Halo 后台 → **插件** → **安装** → 上传 `build/libs/api-gallery-1.4.0.jar`
+1. Halo 后台 → **插件** → **安装** → 上传 `build/libs/api-gallery-1.4.1.jar`
 2. 启用插件
 3. 插件详情 → **设置**，在「API 数据源」里添加你的图源
 
@@ -193,7 +204,7 @@ https://<你的站点>/plugins/api-gallery/assets/static/gallery.html
 
 **2. 放进主题目录**
 ```
-unzip -p api-gallery-1.4.0.jar static/gallery.html > gallery.html
+unzip -p api-gallery-1.4.1.jar static/gallery.html > gallery.html
 cp gallery.html <halo>/themes/theme-Serenity/templates/...
 ```
 具体位置取决于主题，放好后通过主题路由访问。
@@ -214,7 +225,7 @@ var BASE = '/apis/api.gallery.halo.run/v1alpha1';
 
 ```bash
 cd halo-plugin-api-gallery
-gradle build            # 产物 build/libs/api-gallery-1.4.0.jar
+gradle build            # 产物 build/libs/api-gallery-1.4.1.jar
 ```
 
 环境：编译用 JDK 17 字节码（`sourceCompatibility = 17`），但**跑单元测试需要 JDK 21**——
@@ -275,16 +286,17 @@ src/main/resources/
 gradle test
 ```
 
-43 个用例，全部通过：
+49 个用例，全部通过：
 
 | 类 | 用例数 | 覆盖内容 |
 |---|---|---|
 | `GalleryServiceTest` | 10 | 响应解析（顶层数组 / items 包裹 / 单对象随机图 / 未知 key 数组 / 非法载荷）、后台 repeater 配置解析、数据源可用性判断 |
 | `GalleryServiceFetchTest` | 18 | 起本地 HTTP 服务模拟图源，端到端跑通「请求 → 解析 → 生成元数据」，含 500 错误与空数组 |
+| `GalleryServiceRedirectSafetyTest` | 6 | 跳转安全：302 指向云元数据/私有网段/非 http 协议时拒绝跟随；相对与绝对 Location 正常跟随；重定向循环触发最大跳数保护 |
 | `ApiUrlSafetyTest` | 9 | 公共 IP 放行；非 http 协议、非法格式、超长 URL、回环/localhost、私有网段（含 172.32 放行反例）、链路本地与云元数据端点、IPv6 唯一本地、组播/广播全部拒绝 |
 | `PhotoBridgeServiceTest` | 6 | 写入图库的元数据是否正确、重复同步只更新不堆积、分组自动创建与覆盖、撤回时只删本插件写入的记录 |
 
-其中 `GalleryServiceFetchTest` 全程只产生内存对象，不落任何本地文件。
+其中 `GalleryServiceFetchTest` 与 `GalleryServiceRedirectSafetyTest` 全程只产生内存对象，不落任何本地文件。
 
 ## 九、注意事项
 
@@ -367,4 +379,7 @@ gradle test
 
 > **AI 使用声明**：本项目在开发过程中使用了 AI 辅助编码（AI-substantial）。
 > 提交上架前已由开发者对权限边界、对外 HTTP 请求、诊断接口脱敏与上架材料做人工复查，
-> 并在 Halo 2.27.1 实机安装验证。
+> 并在 Halo 2.27.1 实机安装验证。1.4.1 针对审核意见，人工复测了以下路径：
+> 图源 302/307 跳转目标逐跳校验（内网/回环/云元数据/非 http 协议均拒绝、合法跳转与相对路径正常跟随）、
+> 初始地址 SSRF 校验，以及随机源多轮定时同步的滚动更新与去重行为（见 `GalleryServiceRedirectSafetyTest`
+> 与 `GalleryServiceFetchTest`）。

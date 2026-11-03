@@ -327,31 +327,88 @@ public class GalleryService {
     }
 
     /**
-     * 按需构建 HttpClient。
+     * 构建**不跟随重定向**的 HttpClient。
+     *
+     * <p>所有对外请求一律关闭自动跟随跳转（{@code Redirect.NEVER}）。需要跨跳转的请求
+     * 由 {@link #sendFollowingRedirects(String, java.util.function.Function, int)}
+     * 手动逐跳跟随，并在每一跳跳转前重新校验目标地址，防止 3xx 把服务器引导到
+     * 内网、回环或云元数据地址。
      *
      * <p>JDK 的 HttpClient 默认**不读** http.proxyHost 等系统属性，也不会走系统代理，
      * 这在需要代理才能出网的服务器上会直接 ConnectException。
      * 所以这里按「后台配置 → JVM 系统属性 → 直连」的顺序决定代理。
      */
-    public HttpClient http() {
-        return http(true);
-    }
-
-    /**
-     * @param followRedirects false 时不跟随跳转，用于读取 302 的 Location 头
-     */
-    public HttpClient http(boolean followRedirects) {
+    private HttpClient http() {
         var builder = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
-            .followRedirects(followRedirects
-                ? HttpClient.Redirect.NORMAL
-                : HttpClient.Redirect.NEVER);
+            .followRedirects(HttpClient.Redirect.NEVER);
         var proxy = resolveProxy();
         if (proxy.isPresent()) {
             builder.proxy(java.net.ProxySelector.of(proxy.get()));
             log.info("[api-gallery] 使用代理访问图源：{}", proxy.get());
         }
         return builder.build();
+    }
+
+    /**
+     * 发送请求并**安全地手动跟随重定向**。
+     *
+     * <p>JDK 的 {@link HttpClient} 在 {@code Redirect.NORMAL} 下会自动跟随 301/302/303/307/308，
+     * 但跳转后的目标地址不会再次经过 SSRF 校验——恶意图源可以先返回一个公网地址的 302，
+     * 再在 Location 里指向内网、回环或云元数据地址，从而绕过地址校验。
+     *
+     * <p>因此这里关闭自动跟随（{@code Redirect.NEVER}），改为手动跟随：每一跳跳转前都对目标地址
+     * 重新执行 {@link #urlChecker}（协议 + 主机 + DNS 解析 IP）校验，确认跳转目标同样是
+     * 公网 http/https 地址后才继续请求，并限制最大跳数防止重定向循环。
+     *
+     * @param startUrl       起始地址（须为已校验的公网地址）
+     * @param customize      对每跳请求补充 header 等（可为 null）
+     * @param timeoutSeconds 每跳的超时秒数
+     * @return 最终响应（未发生跳转时为第一跳响应）
+     */
+    private HttpResponse<String> sendFollowingRedirects(String startUrl,
+        java.util.function.Function<HttpRequest.Builder, HttpRequest.Builder> customize,
+        int timeoutSeconds) throws Exception {
+        String currentUrl = urlChecker.check(startUrl);
+        HttpClient client = http();
+        int maxHops = 5;
+        for (int hop = 0; hop <= maxHops; hop++) {
+            HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(currentUrl))
+                .timeout(Duration.ofSeconds(timeoutSeconds))
+                .GET();
+            if (customize != null) {
+                builder = customize.apply(builder);
+            }
+            HttpResponse<String> resp =
+                client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+            int code = resp.statusCode();
+            if (!isRedirect(code)) {
+                return resp;
+            }
+            String location = firstHeader(resp, "Location", "location");
+            if (location == null || location.isBlank()) {
+                // 3xx 但没有 Location，无法继续，返回该响应让上层按状态码处理
+                return resp;
+            }
+            String next = resolveLocation(currentUrl, location);
+            log.debug("[api-gallery] 跟随重定向（第 {} 跳）：{} -> {}", hop + 1, currentUrl, next);
+            currentUrl = urlChecker.check(next);
+        }
+        throw new IllegalStateException("重定向次数超过 " + maxHops + " 次，已中止");
+    }
+
+    /** 3xx 重定向状态码 */
+    private static boolean isRedirect(int code) {
+        return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+    }
+
+    /** 把 Location 解析成基于当前地址的绝对 URL（支持相对路径与协议相对路径） */
+    private static String resolveLocation(String base, String location) {
+        try {
+            return URI.create(base).resolve(location.trim()).toString();
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("重定向地址不合法：" + location);
+        }
     }
 
     /** 后台配置优先，其次 JVM 系统属性 */
@@ -459,13 +516,10 @@ public class GalleryService {
                 continue;
             }
             try {
-                HttpRequest req = HttpRequest.newBuilder(safeUri(src))
-                    .timeout(Duration.ofSeconds(30))
-                    .header("Accept", "application/json, text/plain, */*")
-                    .header("User-Agent", "halo-plugin-api-gallery/1.0")
-                    .GET()
-                    .build();
-                HttpResponse<String> resp = http().send(req, HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> resp = sendFollowingRedirects(src.getApiUrl(),
+                    b -> b.header("Accept", "application/json, text/plain, */*")
+                        .header("User-Agent", "halo-plugin-api-gallery/1.0"),
+                    30);
                 m.put("httpStatus", resp.statusCode());
                 String body = resp.body();
                 m.put("bodyLength", body == null ? 0 : body.length());
@@ -498,23 +552,25 @@ public class GalleryService {
         String location = null;
         String failure = null;
         try {
-            HttpClient client = http(!redirect);
+            HttpClient client = redirect ? http() : null;
             for (int i = 0; i < 5; i++) {
-                HttpRequest req = HttpRequest.newBuilder(safeUri(src))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("Accept", redirect ? "image/*,*/*" : "application/json, */*")
-                    .header("User-Agent", "halo-plugin-api-gallery/1.2")
-                    .GET()
-                    .build();
                 String one = null;
                 if (redirect) {
+                    HttpRequest req = HttpRequest.newBuilder(safeUri(src))
+                        .timeout(Duration.ofSeconds(20))
+                        .header("Accept", "image/*,*/*")
+                        .header("User-Agent", "halo-plugin-api-gallery/1.2")
+                        .GET()
+                        .build();
                     HttpResponse<Void> resp =
                         client.send(req, HttpResponse.BodyHandlers.discarding());
                     status = resp.statusCode();
                     one = firstHeader(resp, "Location", "location");
                 } else {
-                    HttpResponse<String> resp =
-                        client.send(req, HttpResponse.BodyHandlers.ofString());
+                    HttpResponse<String> resp = sendFollowingRedirects(src.getApiUrl(),
+                        b -> b.header("Accept", "application/json, */*")
+                            .header("User-Agent", "halo-plugin-api-gallery/1.2"),
+                        20);
                     status = resp.statusCode();
                     String body = resp.body();
                     if (body != null && !body.isBlank()) {
@@ -659,13 +715,10 @@ public class GalleryService {
         if (src.isSampled()) {
             return fetchSampledSource(src);
         }
-        HttpRequest req = HttpRequest.newBuilder(safeUri(src))
-            .timeout(Duration.ofSeconds(30))
-            .header("Accept", "application/json, text/plain, */*")
-            .header("User-Agent", "halo-plugin-api-gallery/1.0")
-            .GET()
-            .build();
-        HttpResponse<String> resp = http().send(req, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> resp = sendFollowingRedirects(src.getApiUrl(),
+            b -> b.header("Accept", "application/json, text/plain, */*")
+                .header("User-Agent", "halo-plugin-api-gallery/1.0"),
+            30);
         if (resp.statusCode() >= 400) {
             throw new IllegalStateException("HTTP " + resp.statusCode());
         }
@@ -714,7 +767,7 @@ public class GalleryService {
         int samples = src.sampleCountOrDefault();
         boolean redirect = src.isRedirect();
 
-        HttpClient client = http(redirect ? false : true);
+        HttpClient client = redirect ? http() : null;
         java.util.Set<String> seen = new java.util.LinkedHashSet<>();
         List<GalleryImageItem> out = new ArrayList<>();
         int failures = 0;
@@ -724,13 +777,13 @@ public class GalleryService {
             List<String> tags = List.of(displayName);
             String title = null;
             try {
-                HttpRequest req = HttpRequest.newBuilder(safeUri(src))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("Accept", redirect ? "image/*,*/*" : "application/json, text/plain, */*")
-                    .header("User-Agent", "halo-plugin-api-gallery/1.2")
-                    .GET()
-                    .build();
                 if (redirect) {
+                    HttpRequest req = HttpRequest.newBuilder(safeUri(src))
+                        .timeout(Duration.ofSeconds(20))
+                        .header("Accept", "image/*,*/*")
+                        .header("User-Agent", "halo-plugin-api-gallery/1.2")
+                        .GET()
+                        .build();
                     HttpResponse<Void> resp =
                         client.send(req, HttpResponse.BodyHandlers.discarding());
                     url = firstHeader(resp, "Location", "location");
@@ -739,8 +792,10 @@ public class GalleryService {
                         url = readBodyAsUrl(src);
                     }
                 } else {
-                    HttpResponse<String> resp =
-                        client.send(req, HttpResponse.BodyHandlers.ofString());
+                    HttpResponse<String> resp = sendFollowingRedirects(src.getApiUrl(),
+                        b -> b.header("Accept", "application/json, text/plain, */*")
+                            .header("User-Agent", "halo-plugin-api-gallery/1.2"),
+                        20);
                     if (resp.statusCode() >= 400) {
                         throw new IllegalStateException("HTTP " + resp.statusCode());
                     }
@@ -830,7 +885,7 @@ public class GalleryService {
                 .GET()
                 .build();
             HttpResponse<String> resp =
-                http(false).send(req, HttpResponse.BodyHandlers.ofString());
+                http().send(req, HttpResponse.BodyHandlers.ofString());
             String body = resp.body();
             if (body != null && body.trim().startsWith("http")) {
                 return body.trim().split("\\s+")[0];
