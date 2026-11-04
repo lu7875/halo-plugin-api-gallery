@@ -89,6 +89,29 @@ class GalleryServiceRedirectSafetyTest {
             ex.close();
         });
 
+        // 302 随机图源：Location 指向云元数据地址，作为图片地址必须被丢弃
+        server.createContext("/pic/evil-metadata", ex -> {
+            ex.getResponseHeaders().add("Location", "http://169.254.169.254/latest/meta-data/");
+            ex.sendResponseHeaders(302, -1);
+            ex.close();
+        });
+        // 302 随机图源：Location 为非 http 协议，必须被丢弃
+        server.createContext("/pic/evil-file", ex -> {
+            ex.getResponseHeaders().add("Location", "file:///etc/passwd");
+            ex.sendResponseHeaders(302, -1);
+            ex.close();
+        });
+        // 302 随机图源：Location 指向本测试服务器（checker 放行），应正常入缓存
+        server.createContext("/pic/good-image", ex -> {
+            ex.getResponseHeaders().add("Location",
+                "http://127.0.0.1:" + port + "/img/ok.webp");
+            ex.sendResponseHeaders(302, -1);
+            ex.close();
+        });
+        // 随机单张 JSON：响应体里塞内网图片地址，必须被丢弃
+        server.createContext("/api/evil-json", ex -> respond(ex, 200,
+            "{\"id\":\"e1\",\"url\":\"http://10.0.0.5/evil.jpg\"}"));
+
         server.start();
 
         service = new GalleryService(null, new PhotoBridgeService(null));
@@ -174,5 +197,50 @@ class GalleryServiceRedirectSafetyTest {
             () -> service.fetchSource(c));
         assertTrue(e.getMessage() != null && e.getMessage().contains("重定向次数"),
             "应提示超过最大跳数，实际：" + e.getMessage());
+    }
+
+    // ------------------------------------------------------------------
+    // 1.4.2：302 随机图源的 Location 也要校验，不能把 3xx 目标写进业务数据
+    // ------------------------------------------------------------------
+
+    private GallerySourceConfig sampledSource(String name, String path, String parser,
+        int samples) {
+        GallerySourceConfig c = source(name, path);
+        c.setParser(parser);
+        c.setSampleCount(samples);
+        return c;
+    }
+
+    @Test
+    @DisplayName("302 随机图源 Location 指向云元数据地址时被丢弃，不写入缓存")
+    void redirectLocationToMetadataIsDropped() throws Exception {
+        List<GalleryImageItem> items = service.fetchSource(
+            sampledSource("恶意随机源", "/pic/evil-metadata", "redirect", 3));
+        assertTrue(items.isEmpty(), "内网 Location 不得作为图片地址写入缓存与图库");
+    }
+
+    @Test
+    @DisplayName("302 随机图源 Location 为非 http 协议时被丢弃")
+    void redirectLocationToFileIsDropped() throws Exception {
+        List<GalleryImageItem> items = service.fetchSource(
+            sampledSource("恶意随机源", "/pic/evil-file", "redirect", 3));
+        assertTrue(items.isEmpty(), "file:// 等非 http 地址不得写入缓存");
+    }
+
+    @Test
+    @DisplayName("302 随机图源合法 Location 正常采集")
+    void redirectLocationToSafeAddressIsKept() throws Exception {
+        List<GalleryImageItem> items = service.fetchSource(
+            sampledSource("正常随机源", "/pic/good-image", "redirect", 2));
+        assertEquals(1, items.size(), "合法公网地址应正常入缓存并去重");
+        assertTrue(items.get(0).getUrl().contains("/img/ok.webp"));
+    }
+
+    @Test
+    @DisplayName("随机单张 JSON 响应体中的内网图片地址被丢弃")
+    void randomJsonInternalUrlIsDropped() throws Exception {
+        List<GalleryImageItem> items = service.fetchSource(
+            sampledSource("恶意 JSON 源", "/api/evil-json", "random-json", 3));
+        assertTrue(items.isEmpty(), "响应体里的内网地址不得写入缓存与图库");
     }
 }

@@ -118,9 +118,9 @@ spec:
       formSchema:
         - $formkit: text
           name: authorBlog
-          label: 作者博客
+          label: 作者主页
           value: "https://github.com/lu7875"
-          help: "使用问题、功能建议或图源推荐，可到作者博客留言交流。"
+          help: "使用问题、功能建议请到 GitHub 仓库提交 Issue；插件源码与更新日志见主页仓库。"
         - $formkit: text
           name: authorName
           label: 作者

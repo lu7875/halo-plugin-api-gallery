@@ -411,6 +411,39 @@ public class GalleryService {
         }
     }
 
+    /**
+     * 校验「从图源响应中取到的图片地址」（302 随机图源的 {@code Location}、
+     * 200 兜底文本、随机单张 JSON 里的 url 字段）。
+     *
+     * <p>服务端虽然不会跟随 302 图源的 {@code Location}（{@code Redirect.NEVER}），
+     * 但若不校验，恶意图源仍可把内网、回环、云元数据或非 http 协议的地址塞进
+     * 缓存与图库并展示到前台。因此这里先按当前响应地址归一成绝对 URL，
+     * 再执行与跳转目标同一套「协议 + 主机 + DNS 解析 IP」校验；
+     * 不合法时返回 {@code null}，由调用方直接丢弃该条目。
+     *
+     * <p>列表型图源 JSON 里的 url 属于业务数据字段（服务端不会请求它，只由访客
+     * 浏览器加载），不在此处校验，以保持对相对路径图源的兼容。
+     */
+    private String safeImageUrl(String base, String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String absolute;
+        try {
+            absolute = resolveLocation(base, raw.trim());
+        } catch (IllegalArgumentException e) {
+            log.debug("[api-gallery] 忽略格式不合法的图片地址：{}", raw);
+            return null;
+        }
+        try {
+            return urlChecker.check(absolute);
+        } catch (RuntimeException e) {
+            log.debug("[api-gallery] 忽略未通过安全校验的图片地址：{} -> {}",
+                raw, e.getMessage());
+            return null;
+        }
+    }
+
     /** 后台配置优先，其次 JVM 系统属性 */
     private java.util.Optional<java.net.InetSocketAddress> resolveProxy() {
         String host = loadProxyConfig("proxyHost");
@@ -521,6 +554,7 @@ public class GalleryService {
                         .header("User-Agent", "halo-plugin-api-gallery/1.0"),
                     30);
                 m.put("httpStatus", resp.statusCode());
+                m.put("contentType", firstHeader(resp, "Content-Type", "content-type"));
                 String body = resp.body();
                 m.put("bodyLength", body == null ? 0 : body.length());
                 // 出于安全考虑不回显响应正文，只给「看起来是不是 JSON」这一结论，
@@ -529,11 +563,12 @@ public class GalleryService {
                 Object json = mapper.readValue(body, Object.class);
                 List<Map<String, Object>> rows = extractRows(json, src.getParser());
                 m.put("rows", rows.size());
-                m.put("firstRow", rows.isEmpty() ? null : rows.get(0));
+                // 只给第一行的字段名，用于确认解析方式，绝不回显字段值
+                m.put("rowFields", rows.isEmpty() ? List.of()
+                    : List.copyOf(rows.get(0).keySet()));
             } catch (Throwable t) {
+                // 只回异常类名：不回显异常消息（可能含图源响应内容）与调用堆栈
                 m.put("exception", t.getClass().getName());
-                m.put("message", String.valueOf(t.getMessage()));
-                // 不返回调用堆栈，避免向调用方泄露内部实现细节
             }
             m.put("elapsedMs", System.currentTimeMillis() - t0);
             out.add(m);
@@ -565,7 +600,8 @@ public class GalleryService {
                     HttpResponse<Void> resp =
                         client.send(req, HttpResponse.BodyHandlers.discarding());
                     status = resp.statusCode();
-                    one = firstHeader(resp, "Location", "location");
+                    String raw = firstHeader(resp, "Location", "location");
+                    one = safeImageUrl(src.getApiUrl(), raw);
                 } else {
                     HttpResponse<String> resp = sendFollowingRedirects(src.getApiUrl(),
                         b -> b.header("Accept", "application/json, */*")
@@ -577,8 +613,9 @@ public class GalleryService {
                         List<Map<String, Object>> rows =
                             extractRows(mapper.readValue(body, Object.class), "auto");
                         if (!rows.isEmpty()) {
-                            one = pickString(rows.get(0), src.getUrlField(),
+                            String raw = pickString(rows.get(0), src.getUrlField(),
                                 GallerySourceConfig.defaultUrlFields());
+                            one = safeImageUrl(responseBase(resp, src), raw);
                         }
                     }
                 }
@@ -589,7 +626,8 @@ public class GalleryService {
                 Thread.sleep(120);
             }
         } catch (Throwable t) {
-            failure = describe(t);
+            // 只回异常类名，不回显异常消息与调用堆栈
+            failure = t.getClass().getName();
         }
         m.put("httpStatus", status);
         m.put("location", location);
@@ -786,7 +824,8 @@ public class GalleryService {
                         .build();
                     HttpResponse<Void> resp =
                         client.send(req, HttpResponse.BodyHandlers.discarding());
-                    url = firstHeader(resp, "Location", "location");
+                    // Location 是 3xx 的跳转目标，必须重新校验后才能作为图片地址入缓存
+                    url = safeImageUrl(src.getApiUrl(), firstHeader(resp, "Location", "location"));
                     // 少数图源不返回 3xx 而是直接给 200 + 图片地址文本
                     if (url == null && resp.statusCode() == 200) {
                         url = readBodyAsUrl(src);
@@ -805,8 +844,9 @@ public class GalleryService {
                         List<Map<String, Object>> rows = extractRows(json, "auto");
                         if (!rows.isEmpty()) {
                             Map<String, Object> row = rows.get(0);
-                            url = pickString(row, src.getUrlField(),
-                                GallerySourceConfig.defaultUrlFields());
+                            url = safeImageUrl(responseBase(resp, src),
+                                pickString(row, src.getUrlField(),
+                                    GallerySourceConfig.defaultUrlFields()));
                             String t = pickString(row, src.getTitleField(),
                                 GallerySourceConfig.defaultTitleFields());
                             title = (t == null || t.isBlank()) ? null : t;
@@ -887,13 +927,26 @@ public class GalleryService {
             HttpResponse<String> resp =
                 http().send(req, HttpResponse.BodyHandlers.ofString());
             String body = resp.body();
-            if (body != null && body.trim().startsWith("http")) {
-                return body.trim().split("\\s+")[0];
+            if (body != null && !body.isBlank()) {
+                String candidate = body.trim().split("\\s+")[0];
+                if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+                    // 200 兜底文本同样是外部提供的地址，必须过安全校验
+                    return safeImageUrl(responseBase(resp, src), candidate);
+                }
             }
         } catch (Exception ignore) {
             // 兜底失败不影响主流程
         }
         return null;
+    }
+
+    /** 以最终响应的 URI 作为相对地址解析基准；拿不到时退回图源配置地址 */
+    private static String responseBase(HttpResponse<?> resp, GallerySourceConfig src) {
+        try {
+            return resp.uri() == null ? src.getApiUrl() : resp.uri().toString();
+        } catch (RuntimeException e) {
+            return src.getApiUrl();
+        }
     }
 
     /** 按 parser 规则把响应归一成「行」的列表 */

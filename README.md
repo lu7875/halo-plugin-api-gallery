@@ -3,7 +3,7 @@
 Halo 2.x 插件。在后台配置任意**图片 API 地址**，插件定时拉取素材并在前端展示。
 **图片只缓存地址等元数据，文件始终由第三方图源提供，不下载、不写入附件库，不占用本地存储。**
 
-> 当前版本 **1.4.1**。从旧版升级请看 [十、常见问题](#十常见问题) 里的接口路径迁移说明。
+> 当前版本 **1.4.2**。从旧版升级请看 [十、常见问题](#十常见问题) 里的接口路径迁移说明。
 
 ## 一、安全设计
 
@@ -38,6 +38,18 @@ HTTP 客户端的自动跟随就会绕过上面的校验。因此 1.4.1 起：
 - 限制最大 5 跳，防止重定向循环；
 - `Location` 支持相对路径与协议相对路径（基于当前地址解析后再校验）。
 
+### 1.2 响应中的图片地址同样校验（1.4.2 新增）
+
+302 随机图源会把 `Location` 当作图片地址写入缓存与「图库管理」，200 兜底文本和
+随机单张 JSON 里的 `url` 字段也是同样性质。服务端虽然不会跟随这些地址
+（`Redirect.NEVER`），但 1.4.2 起**一律先按当前响应地址归一为绝对 URL，再执行与
+跳转目标相同的 SSRF 校验**；指向内网、回环、云元数据或非 http 协议的地址直接丢弃，
+不会写进缓存、图库或前台页面。
+
+> 边界说明：列表型图源 JSON 里的 `url` 属于业务数据字段，服务端不会请求它，
+> 只由访客浏览器加载（受浏览器同源策略约束），因此不做 DNS 级校验，
+> 以保留对相对路径图源的兼容。
+
 ### 2. 接口权限边界（1.4.0 收紧）
 
 插件对外接口分成**两个 group**，权限互不相干：
@@ -51,15 +63,17 @@ HTTP 客户端的自动跟随就会绕过上面的校验。因此 1.4.1 起：
 导致**访客可以匿名读取 `/sources`（数据源地址明细）和 `/diagnose`（含图源响应体）**。
 1.4.0 把这两类接口拆开，匿名角色只保留公开只读组的读权限。
 
-### 3. 诊断接口脱敏（1.4.0）
+### 3. 诊断接口脱敏（1.4.0，1.4.2 收紧）
 
-`/diagnose` 不再返回图源响应体片段和异常堆栈栈顶，改为只回：
+`/diagnose` 不返回图源响应正文、字段值、异常消息与调用堆栈。与响应内容相关的字段只有：
 
 - `httpStatus`、`contentType`、`bodyLength`
 - `looksLikeJson`（首字符是否为 `{` 或 `[`）
-- `exception`（异常类名）
+- `rows`（解析出的行数）与 `rowFields`（第一行的**字段名**；1.4.2 起用它替代原先会回显字段值的 `firstRow`）
+- `exception`（仅异常类名；1.4.2 起不再返回 `message` 与堆栈首行）
 
-用于判断「图源返回的是不是 JSON」的信息量足够，但不会泄露第三方响应内容。
+随机类图源的诊断另返回 `location` / `sampleUrls`，即采样到的图片地址，仅管理端可见，
+用于核对「这个接口到底是不是随机的」。这些地址在返回前同样经过 1.4.2 的安全校验。
 
 ### 4. 写操作隔离
 
@@ -82,7 +96,7 @@ HTTP 客户端的自动跟随就会绕过上面的校验。因此 1.4.1 起：
 
 ## 三、安装
 
-1. Halo 后台 → **插件** → **安装** → 上传 `build/libs/api-gallery-1.4.1.jar`
+1. Halo 后台 → **插件** → **安装** → 上传 `build/libs/api-gallery-1.4.2.jar`
 2. 启用插件
 3. 插件详情 → **设置**，在「API 数据源」里添加你的图源
 
@@ -204,7 +218,7 @@ https://<你的站点>/plugins/api-gallery/assets/static/gallery.html
 
 **2. 放进主题目录**
 ```
-unzip -p api-gallery-1.4.1.jar static/gallery.html > gallery.html
+unzip -p api-gallery-1.4.2.jar static/gallery.html > gallery.html
 cp gallery.html <halo>/themes/theme-Serenity/templates/...
 ```
 具体位置取决于主题，放好后通过主题路由访问。
@@ -225,7 +239,7 @@ var BASE = '/apis/api.gallery.halo.run/v1alpha1';
 
 ```bash
 cd halo-plugin-api-gallery
-gradle build            # 产物 build/libs/api-gallery-1.4.1.jar
+gradle build            # 产物 build/libs/api-gallery-1.4.2.jar
 ```
 
 环境：编译用 JDK 17 字节码（`sourceCompatibility = 17`），但**跑单元测试需要 JDK 21**——
@@ -379,7 +393,8 @@ gradle test
 
 > **AI 使用声明**：本项目在开发过程中使用了 AI 辅助编码（AI-substantial）。
 > 提交上架前已由开发者对权限边界、对外 HTTP 请求、诊断接口脱敏与上架材料做人工复查，
-> 并在 Halo 2.27.1 实机安装验证。1.4.1 针对审核意见，人工复测了以下路径：
+> 并在 Halo 2.27.1 实机安装验证。1.4.1 / 1.4.2 针对审核意见，人工复测了以下路径：
 > 图源 302/307 跳转目标逐跳校验（内网/回环/云元数据/非 http 协议均拒绝、合法跳转与相对路径正常跟随）、
-> 初始地址 SSRF 校验，以及随机源多轮定时同步的滚动更新与去重行为（见 `GalleryServiceRedirectSafetyTest`
+> 302 随机图源 `Location` 与随机 JSON 图片地址的二次校验、初始地址 SSRF 校验，
+> 以及随机源多轮定时同步的滚动更新与去重行为（见 `GalleryServiceRedirectSafetyTest`
 > 与 `GalleryServiceFetchTest`）。
