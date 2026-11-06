@@ -56,9 +56,32 @@ public class GalleryService {
     /** 上一轮已经写进 Halo 图库的条目，用于淘汰被滚动掉的旧图 */
     private volatile List<GalleryImageItem> lastPushed = List.of();
 
+    /** 「稳定与巡检」「前台展示」配置组名，对应 settings.yaml 的 group */
+    public static final String STABILITY_KEY = "stability";
+    public static final String DISPLAY_KEY = "display";
+
+    /** 本地快照存储，由 Spring 注入；单元测试不注入时自动跳过持久化 */
+    private GallerySnapshotStore snapshotStore;
+    /** 每个数据源连续同步失败次数，同步成功即清零 */
+    private final Map<String, Integer> consecutiveFailures = new LinkedHashMap<>();
+    /** 每个数据源最近一次告警时间，用于告警防抖 */
+    private final Map<String, Instant> failureNotifiedAt = new LinkedHashMap<>();
+    /** 疑似死链地址及其连续探测失败次数 */
+    private final Map<String, Integer> deadFailures = new LinkedHashMap<>();
+    private volatile int deadRemovedTotal = 0;
+    private volatile int lastDeadRemoved = 0;
+    private volatile Instant lastDeadCheckAt;
+    private volatile boolean snapshotRestored = false;
+
     public GalleryService(ExtensionClient client, PhotoBridgeService photoBridge) {
         this.client = client;
         this.photoBridge = photoBridge;
+    }
+
+    /** 可选注入：测试环境没有 Spring 上下文时为 null，自动退化为纯内存缓存 */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSnapshotStore(GallerySnapshotStore snapshotStore) {
+        this.snapshotStore = snapshotStore;
     }
 
     // ------------------------------------------------------------ 配置
@@ -283,15 +306,21 @@ public class GalleryService {
                     fresh.addAll(items);
                 }
                 lastSyncAt.put(key, Instant.now());
+                consecutiveFailures.remove(key);
+                failureNotifiedAt.remove(key);
                 ok++;
                 log.info("[api-gallery] 数据源「{}」同步到 {} 张", key, items.size());
             } catch (Throwable t) {
-                lastError.put(key, describe(t));
+                String reason = describe(t);
+                lastError.put(key, reason);
                 // 随机源拉失败时也要保住已经攒下的图，不能清空
                 if (src.isSampled()) {
                     fresh.addAll(cache.stream().filter(i -> key.equals(i.getSource())).toList());
                 }
-                log.warn("[api-gallery] 数据源「{}」同步失败", src.getApiUrl(), t);
+                int fails = consecutiveFailures.getOrDefault(key, 0) + 1;
+                consecutiveFailures.put(key, fails);
+                maybeAlert(key, fails, reason);
+                log.warn("[api-gallery] 数据源「{}」同步失败（连续 {} 次）", src.getApiUrl(), fails, t);
             }
         }
         cache.clear();
@@ -299,8 +328,175 @@ public class GalleryService {
         lastSync = Instant.now();
         // 周期任务是「跑完再等一个周期」，所以下次时间从这里重新算
         nextSyncAt = Instant.now().plus(Duration.ofMinutes(intervalMinutes));
+        saveSnapshot();
         syncPhotosIfNeeded();
         return fresh.size();
+    }
+
+    // ------------------------------------------------------------ 快照持久化
+
+    /**
+     * 启动时从本地快照恢复图库，让 Halo 重启 / 升级后立刻有图可看。
+     *
+     * <p>只在「缓存为空且尚未恢复过」时生效，避免覆盖运行中的最新数据；
+     * 恢复后后台同步仍会照常执行，快照只是过渡期的兜底。
+     *
+     * @return 恢复后的缓存条目数
+     */
+    public synchronized int restoreSnapshot() {
+        if (snapshotRestored) {
+            return cache.size();
+        }
+        snapshotRestored = true;
+        if (!cache.isEmpty() || snapshotStore == null
+            || !boolSetting(STABILITY_KEY, "snapshotEnabled", true)) {
+            return cache.size();
+        }
+        List<GalleryImageItem> loaded = snapshotStore.load();
+        if (!loaded.isEmpty()) {
+            cache.addAll(loaded);
+            if (snapshotStore.getSavedAt() != null) {
+                lastSync = snapshotStore.getSavedAt();
+            }
+            log.info("[api-gallery] 启动恢复快照 {} 条，等待后台同步刷新", loaded.size());
+        }
+        return cache.size();
+    }
+
+    /** 同步成功或停止插件时保存快照；失败只记日志 */
+    public void saveSnapshot() {
+        if (snapshotStore == null || !boolSetting(STABILITY_KEY, "snapshotEnabled", true)) {
+            return;
+        }
+        snapshotStore.save(all());
+    }
+
+    /** 插件停止时调用，把最后一版缓存落盘 */
+    public void saveSnapshotOnStop() {
+        try {
+            saveSnapshot();
+        } catch (Exception e) {
+            log.debug("[api-gallery] 停止时保存快照失败", e);
+        }
+    }
+
+    // ------------------------------------------------------------ 死链巡检
+
+    /**
+     * 抽样探测第三方图片地址是否仍然有效，连续多次确认失效的条目会被清出缓存。
+     *
+     * <p>采用「每个数据源随机抽样」而不是固定取前 N 张，长期运行可以覆盖到全部图片；
+     * 只有明确的 404/410/403 才计为失败，超时与 5xx 不计，避免误删。
+     *
+     * @return 本轮巡检统计（抽样数、剔除数、疑似死链数等）
+     */
+    public synchronized Map<String, Object> checkDeadLinks() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (!boolSetting(STABILITY_KEY, "deadLinkCheckEnabled", true)) {
+            result.put("skipped", true);
+            result.put("reason", "后台已关闭死链巡检");
+            return result;
+        }
+        if (cache.isEmpty()) {
+            result.put("checked", 0);
+            result.put("removed", 0);
+            return result;
+        }
+        int sampleSize = intSetting(STABILITY_KEY, "deadLinkSampleSize", 20, 1, 200);
+        int maxFailures = intSetting(STABILITY_KEY, "deadLinkMaxFailures", 3, 1, 10);
+        boolean autoRemove = boolSetting(STABILITY_KEY, "deadLinkAutoRemove", true);
+
+        GalleryDeadLinkChecker checker = new GalleryDeadLinkChecker(http(), urlChecker::check);
+        Map<String, List<GalleryImageItem>> bySource = new LinkedHashMap<>();
+        for (GalleryImageItem item : cache) {
+            bySource.computeIfAbsent(String.valueOf(item.getSource()), k -> new ArrayList<>())
+                .add(item);
+        }
+
+        int checked = 0;
+        int alive = 0;
+        int unknown = 0;
+        List<String> toRemove = new ArrayList<>();
+        for (Map.Entry<String, List<GalleryImageItem>> entry : bySource.entrySet()) {
+            List<GalleryImageItem> pool = new ArrayList<>(entry.getValue());
+            java.util.Collections.shuffle(pool);
+            int limit = Math.min(sampleSize, pool.size());
+            for (int i = 0; i < limit; i++) {
+                GalleryImageItem item = pool.get(i);
+                String url = item.getUrl();
+                GalleryDeadLinkChecker.Status status = checker.probe(url);
+                checked++;
+                if (status == GalleryDeadLinkChecker.Status.ALIVE) {
+                    alive++;
+                    deadFailures.remove(url);
+                } else if (status == GalleryDeadLinkChecker.Status.DEAD) {
+                    int fails = deadFailures.getOrDefault(url, 0) + 1;
+                    deadFailures.put(url, fails);
+                    if (autoRemove && fails >= maxFailures) {
+                        toRemove.add(url);
+                    }
+                } else {
+                    unknown++;
+                }
+            }
+        }
+
+        int removed = 0;
+        if (!toRemove.isEmpty()) {
+            int before = cache.size();
+            cache.removeIf(i -> toRemove.contains(i.getUrl()));
+            removed = before - cache.size();
+            for (String url : toRemove) {
+                deadFailures.remove(url);
+            }
+            deadRemovedTotal += removed;
+            saveSnapshot();
+            log.info("[api-gallery] 死链巡检剔除 {} 张失效图片（累计 {} 张）", removed, deadRemovedTotal);
+        }
+        lastDeadRemoved = removed;
+        lastDeadCheckAt = Instant.now();
+
+        result.put("checked", checked);
+        result.put("alive", alive);
+        result.put("unknown", unknown);
+        result.put("suspected", deadFailures.size());
+        result.put("removed", removed);
+        result.put("removedTotal", deadRemovedTotal);
+        result.put("checkedAt", lastDeadCheckAt.toString());
+        return result;
+    }
+
+    // ------------------------------------------------------------ 失败告警
+
+    /** 连续失败达到阈值时推送 Webhook；同一数据源在告警间隔内只推一次，避免刷屏 */
+    private void maybeAlert(String source, int fails, String reason) {
+        try {
+            int threshold = intSetting(STABILITY_KEY, "alertAfterFailures", 3, 1, 50);
+            if (fails < threshold) {
+                return;
+            }
+            String webhook = loadSetting(STABILITY_KEY, "alertWebhookUrl");
+            if (webhook == null) {
+                return;
+            }
+            int intervalHours = intSetting(STABILITY_KEY, "alertIntervalHours", 6, 1, 720);
+            Instant last = failureNotifiedAt.get(source);
+            if (last != null
+                && Duration.between(last, Instant.now()).toHours() < intervalHours) {
+                return;
+            }
+            String text = "数据源「" + source + "」已连续 " + fails + " 次同步失败。\n原因：" + reason
+                + "\n当前缓存图片 " + cache.size() + " 张（随机源旧图会继续保留）。"
+                + "\n请到 Halo 后台 → 插件 → API 图库 → 设置检查图源地址。";
+            boolean ok = new GalleryNotifier(http(), urlChecker::check)
+                .send(webhook, "API 图库数据源同步失败", text);
+            if (ok) {
+                failureNotifiedAt.put(source, Instant.now());
+                log.info("[api-gallery] 已推送数据源「{}」失败告警", source);
+            }
+        } catch (Exception e) {
+            log.debug("[api-gallery] 失败告警发送异常", e);
+        }
     }
 
     /** 图源地址安全校验策略 */
@@ -497,6 +693,55 @@ public class GalleryService {
             return v == null ? 0 : Integer.parseInt(v);
         } catch (NumberFormatException e) {
             return 0;
+        }
+    }
+
+    // ------------------------------------------------------------ 通用配置读取
+
+    /** 读取指定配置组里的字符串值；Halo 会把整组设置以 JSON 字符串形式存放，这里自动解析 */
+    public String loadSetting(String group, String key) {
+        try {
+            var cm = client.fetch(ConfigMap.class, CONFIG_MAP_NAME);
+            if (cm.isEmpty() || cm.get().getData() == null) {
+                return null;
+            }
+            Object raw = cm.get().getData().get(group);
+            if (raw == null) {
+                return null;
+            }
+            Object parsed = raw instanceof String s && !s.isBlank()
+                ? mapper.readValue(s, Object.class) : raw;
+            if (parsed instanceof Map<?, ?> map) {
+                Object v = map.get(key);
+                if (v != null) {
+                    String s = String.valueOf(v).trim();
+                    return s.isEmpty() ? null : s;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[api-gallery] 读取配置 {}.{} 失败", group, key, e);
+        }
+        return null;
+    }
+
+    public boolean boolSetting(String group, String key, boolean def) {
+        String v = loadSetting(group, key);
+        if (v == null) {
+            return def;
+        }
+        return "true".equalsIgnoreCase(v) || "1".equals(v) || "yes".equalsIgnoreCase(v);
+    }
+
+    public int intSetting(String group, String key, int def, int min, int max) {
+        String v = loadSetting(group, key);
+        if (v == null) {
+            return def;
+        }
+        try {
+            int n = Integer.parseInt(v.trim());
+            return Math.max(min, Math.min(max, n));
+        } catch (NumberFormatException e) {
+            return def;
         }
     }
 
@@ -1046,6 +1291,79 @@ public class GalleryService {
             return all();
         }
         return cache.stream().filter(i -> source.equals(i.getSource())).toList();
+    }
+
+    /** 按数据源 + 标签过滤；两个条件都留空时等同于 {@link #all()} */
+    public List<GalleryImageItem> filter(String source, String tag) {
+        return cache.stream()
+            .filter(i -> source == null || source.isBlank() || source.equals(i.getSource()))
+            .filter(i -> tag == null || tag.isBlank()
+                || (i.getTags() != null && i.getTags().contains(tag)))
+            .toList();
+    }
+
+    /** 缓存中出现过的全部标签，供前台做筛选 */
+    public List<String> allTags() {
+        java.util.Set<String> tags = new java.util.TreeSet<>();
+        for (GalleryImageItem i : cache) {
+            if (i.getTags() != null) {
+                tags.addAll(i.getTags());
+            }
+        }
+        return new ArrayList<>(tags);
+    }
+
+    /**
+     * 公开给前台的源列表。
+     *
+     * <p>安全边界：这里只返回名称、图片数与标签，**绝不返回 apiUrl**。
+     * 图源地址属于管理端信息，公开组（可对匿名放行）不允许泄露，
+     * 否则会暴露第三方接口结构，方便他人盗刷。
+     */
+    public List<Map<String, Object>> publicSources() {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        Map<String, java.util.Set<String>> tags = new LinkedHashMap<>();
+        for (GalleryImageItem i : cache) {
+            String s = (i.getSource() == null || i.getSource().isBlank()) ? "未分组" : i.getSource();
+            counts.merge(s, 1, Integer::sum);
+            if (i.getTags() != null) {
+                tags.computeIfAbsent(s, k -> new java.util.TreeSet<>()).addAll(i.getTags());
+            }
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map.Entry<String, Integer> e : counts.entrySet()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("name", e.getKey());
+            m.put("count", e.getValue());
+            m.put("tags", new ArrayList<>(tags.getOrDefault(e.getKey(), java.util.Set.of())));
+            out.add(m);
+        }
+        return out;
+    }
+
+    /** 前台展示文案等配置（带默认值） */
+    public String displayText(String key, String def) {
+        String v = loadSetting(DISPLAY_KEY, key);
+        return v == null ? def : v;
+    }
+
+    /** 稳定性运行状态，仅供管理端接口展示 */
+    public Map<String, Object> stabilityStatus() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("snapshotEnabled", boolSetting(STABILITY_KEY, "snapshotEnabled", true));
+        m.put("snapshotFile", snapshotStore == null ? null : snapshotStore.getFile().toString());
+        m.put("snapshotSavedAt", snapshotStore == null || snapshotStore.getSavedAt() == null
+            ? null : snapshotStore.getSavedAt().toString());
+        m.put("consecutiveFailures", Map.copyOf(consecutiveFailures));
+        m.put("suspectedDeadLinks", deadFailures.size());
+        m.put("lastDeadRemoved", lastDeadRemoved);
+        m.put("deadRemovedTotal", deadRemovedTotal);
+        m.put("lastDeadCheckAt", lastDeadCheckAt == null ? null : lastDeadCheckAt.toString());
+        m.put("deadLinkCheckEnabled", boolSetting(STABILITY_KEY, "deadLinkCheckEnabled", true));
+        m.put("deadLinkCheckIntervalMinutes",
+            intSetting(STABILITY_KEY, "deadLinkCheckIntervalMinutes", 60, 15, 1440));
+        m.put("alertWebhookConfigured", loadSetting(STABILITY_KEY, "alertWebhookUrl") != null);
+        return m;
     }
 
     public int count() {

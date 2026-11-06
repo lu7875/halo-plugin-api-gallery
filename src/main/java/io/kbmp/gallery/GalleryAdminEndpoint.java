@@ -41,6 +41,8 @@ public class GalleryAdminEndpoint implements CustomEndpoint {
             .andRoute(RequestPredicates.GET("/diagnose"), this::diagnose)
             .andRoute(RequestPredicates.POST("/sync"), this::sync)
             .andRoute(RequestPredicates.POST("/push-to-photos"), this::pushToPhotos)
+            .andRoute(RequestPredicates.GET("/stability"), this::stability)
+            .andRoute(RequestPredicates.POST("/dead-link-check"), this::deadLinkCheck)
             .andRoute(RequestPredicates.DELETE("/photos"), this::retractPhotos);
     }
 
@@ -114,6 +116,23 @@ public class GalleryAdminEndpoint implements CustomEndpoint {
         body.put("updated", r.updated);
         body.put("failed", r.failed);
         return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(body);
+    }
+
+    /** GET /stability —— 快照状态、各源连续失败次数、死链巡检统计（仅管理端） */
+    private Mono<ServerResponse> stability(ServerRequest request) {
+        // 读 ConfigMap 是阻塞调用，显式切到弹性线程，避免占用 Reactor 事件循环
+        return Mono.fromCallable(service::stabilityStatus)
+            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
+            .flatMap(body -> ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body));
+    }
+
+    /** POST /dead-link-check —— 手动触发一轮抽样巡检，会真实探测第三方图片地址 */
+    private Mono<ServerResponse> deadLinkCheck(ServerRequest request) {
+        return Mono.fromCallable(service::checkDeadLinks)
+            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
+            .flatMap(body -> ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body));
     }
 
     /** DELETE /photos —— 撤回本插件写入图库的记录（不动你手工上传的照片） */

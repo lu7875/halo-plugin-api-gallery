@@ -3,7 +3,7 @@
 Halo 2.x 插件。在后台配置任意**图片 API 地址**，插件定时拉取素材并在前端展示。
 **图片只缓存地址等元数据，文件始终由第三方图源提供，不下载、不写入附件库，不占用本地存储。**
 
-> 当前版本 **1.4.2**。从旧版升级请看 [十、常见问题](#十常见问题) 里的接口路径迁移说明。
+> 当前版本 **1.5.0**。从旧版升级请看 [十、常见问题](#十常见问题) 里的接口路径迁移说明。
 
 ## 一、安全设计
 
@@ -93,10 +93,14 @@ HTTP 客户端的自动跟随就会绕过上面的校验。因此 1.4.1 起：
 | 开箱可用 | 未配置时内置派次元示例源，装完就有图 |
 | 访客可读 | 自动给匿名用户只读权限，前台页面不必登录即可展示（可关闭） |
 | 对接图库 | 把图片地址写成 Photo 记录，直接在后台 `/console/photos` 和主题 `/photos` 显示，仍不占存储 |
+| 快照持久化（1.5.0） | 每次同步后把元数据原子写入工作目录 `plugins/api-gallery/snapshot.json`，**Halo 重启 / 升级核心 / 重载插件后先恢复快照**，不再长时间空图；快照损坏自动隔离，不影响启动 |
+| 死链巡检（1.5.0） | 按周期对每个源**随机抽样**探测（HEAD，不支持时降级 Range GET，不下载完整图片）；只有 404/410/403 计为失效，**超时与 5xx 不计**，连续 N 次（默认 3）确认后才剔除，剔除后同步更新快照 |
+| 失败告警（1.5.0） | 数据源连续失败达阈值（默认 3 次）推送 Webhook（公网地址，过同一套 SSRF 校验），同一源默认 6 小时内只告一次，恢复后自动清零计数 |
+| 前台展示（1.5.0） | 自包含展示页升级为**按原始宽高比的瀑布流**，灯箱支持左右切换 / 键盘导航 / 缩放 / 复制地址 / 复制 Markdown / 打开原图，另有标签筛选、标题搜索、随机排序、骨架屏与失败占位重试 |
 
 ## 三、安装
 
-1. Halo 后台 → **插件** → **安装** → 上传 `build/libs/api-gallery-1.4.2.jar`
+1. Halo 后台 → **插件** → **安装** → 上传 `build/libs/api-gallery-1.5.0.jar`
 2. 启用插件
 3. 插件详情 → **设置**，在「API 数据源」里添加你的图源
 
@@ -150,8 +154,10 @@ HTTP 客户端的自动跟随就会绕过上面的校验。因此 1.4.1 起：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/items?source=&page=1&size=20` | 分页返回图片元数据 |
+| GET | `/items?source=&tag=&page=1&size=20` | 分页返回图片元数据，支持按数据源与标签过滤；单页上限 200（1.5.0 起） |
 | GET | `/random?source=` | 随机一张（适合做站点头图/背景） |
+| GET | `/sources` | 前台筛选用：各源名称、图片数与标签，**不含 apiUrl**（1.5.0 新增） |
+| GET | `/page-config` | 展示页标题、副标题、每页数量、是否显示来源/标签/原图按钮（1.5.0 新增） |
 
 `/items` 返回示例：
 
@@ -176,6 +182,8 @@ HTTP 客户端的自动跟随就会绕过上面的校验。因此 1.4.1 起：
 | GET | `/diagnose` | 逐个源实探一次，返回脱敏后的状态信息 |
 | POST | `/sync` | 手动触发同步（会顺带写入图库） |
 | POST | `/push-to-photos` | 手动把当前缓存推送到图库，返回 `{created, updated, failed}` |
+| GET | `/stability` | 快照文件与保存时间、各源连续失败次数、疑似死链数、巡检统计（1.5.0 新增） |
+| POST | `/dead-link-check` | 手动触发一轮抽样死链巡检，返回 `{checked, alive, unknown, suspected, removed}`（1.5.0 新增） |
 | DELETE | `/photos` | 撤回本插件写入图库的记录，返回 `{removed}` |
 
 > **⚠️ 路径变更**：`/sources`、`/diagnose`、`/sync`、`/push-to-photos`、`/photos`
@@ -201,8 +209,12 @@ Halo 的 `/apis/**` 默认要求登录，未登录访问会 302 到 `/login?auth
 
 ## 五、前台展示页
 
-插件**自带**一个自包含的展示页（瀑布流 + 懒加载 + 灯箱 + 按源筛选 + 随机图），
-打包在 jar 里，启用插件即可直接访问：
+插件**自带**一个自包含的展示页，打包在 jar 里，启用插件即可直接访问。
+1.5.0 起升级为：**按原始宽高比的瀑布流**（不再统一裁切成 3:4）、懒加载、滚动 / 按钮加载更多、
+按源与标签筛选、标题搜索、随机排序、骨架屏、图片失败占位与重试；
+灯箱支持**左右切换、键盘 ←/→/Esc、缩放（按钮 / 双击 / +−）、复制图片地址、复制 Markdown、打开原图**。
+页面标题、副标题（兼作 SEO 描述）、每页数量、来源与标签显示、原图按钮均可在后台「前台展示」组配置，
+页面不依赖任何外部 JS/CSS，可离线自托管。
 
 ```
 https://<你的站点>/plugins/api-gallery/assets/static/gallery.html
@@ -218,7 +230,7 @@ https://<你的站点>/plugins/api-gallery/assets/static/gallery.html
 
 **2. 放进主题目录**
 ```
-unzip -p api-gallery-1.4.2.jar static/gallery.html > gallery.html
+unzip -p api-gallery-1.5.0.jar static/gallery.html > gallery.html
 cp gallery.html <halo>/themes/theme-Serenity/templates/...
 ```
 具体位置取决于主题，放好后通过主题路由访问。
@@ -239,7 +251,7 @@ var BASE = '/apis/api.gallery.halo.run/v1alpha1';
 
 ```bash
 cd halo-plugin-api-gallery
-gradle build            # 产物 build/libs/api-gallery-1.4.2.jar
+gradle build            # 产物 build/libs/api-gallery-1.5.0.jar
 ```
 
 环境：编译用 JDK 17 字节码（`sourceCompatibility = 17`），但**跑单元测试需要 JDK 21**——
@@ -300,15 +312,19 @@ src/main/resources/
 gradle test
 ```
 
-49 个用例，全部通过：
+76 个用例，全部通过：
 
 | 类 | 用例数 | 覆盖内容 |
 |---|---|---|
 | `GalleryServiceTest` | 10 | 响应解析（顶层数组 / items 包裹 / 单对象随机图 / 未知 key 数组 / 非法载荷）、后台 repeater 配置解析、数据源可用性判断 |
 | `GalleryServiceFetchTest` | 18 | 起本地 HTTP 服务模拟图源，端到端跑通「请求 → 解析 → 生成元数据」，含 500 错误与空数组 |
-| `GalleryServiceRedirectSafetyTest` | 6 | 跳转安全：302 指向云元数据/私有网段/非 http 协议时拒绝跟随；相对与绝对 Location 正常跟随；重定向循环触发最大跳数保护 |
+| `GalleryServiceRedirectSafetyTest` | 10 | 跳转安全：302 指向云元数据/私有网段/非 http 协议时拒绝跟随；相对与绝对 Location 正常跟随；重定向循环触发最大跳数保护；302 `Location` 与随机 JSON 图片地址二次校验 |
 | `ApiUrlSafetyTest` | 9 | 公共 IP 放行；非 http 协议、非法格式、超长 URL、回环/localhost、私有网段（含 172.32 放行反例）、链路本地与云元数据端点、IPv6 唯一本地、组播/广播全部拒绝 |
 | `PhotoBridgeServiceTest` | 6 | 写入图库的元数据是否正确、重复同步只更新不堆积、分组自动创建与覆盖、撤回时只删本插件写入的记录 |
+| `GallerySnapshotStoreTest` | 6 | 快照写读往返、多级目录自动创建、文件缺失返回空、坏文件隔离为 `.corrupt`、空地址条目不恢复、空快照 |
+| `GalleryDeadLinkCheckerTest` | 7 | 200 判存活、404/403 判失效、**500 与连接失败判 UNKNOWN 不误删**、HEAD 405 自动降级 Range GET、非法地址拦截 |
+| `GalleryServiceStabilityTest` | 6 | 快照恢复后筛选与公开源列表（断言不含 apiUrl）、只恢复一次、连续 3 次 404 才剔除且保留正常图、5xx 永不剔除、剔除后同步重写快照 |
+| `GalleryNotifierTest` | 4 | Webhook JSON 内容、非 2xx 返回失败、内网地址拦截、空地址忽略 |
 
 其中 `GalleryServiceFetchTest` 与 `GalleryServiceRedirectSafetyTest` 全程只产生内存对象，不落任何本地文件。
 
@@ -398,3 +414,7 @@ gradle test
 > 302 随机图源 `Location` 与随机 JSON 图片地址的二次校验、初始地址 SSRF 校验，
 > 以及随机源多轮定时同步的滚动更新与去重行为（见 `GalleryServiceRedirectSafetyTest`
 > 与 `GalleryServiceFetchTest`）。
+> 1.5.0 新增功能人工复测：快照保存与重启恢复、坏快照隔离、死链巡检的「只剔除明确失效、
+> 超时与 5xx 不误删」边界、连续失败告警的阈值与防抖、公开 `/sources` 不泄露 apiUrl、
+> 前台瀑布流与灯箱交互（见 `GallerySnapshotStoreTest`、`GalleryDeadLinkCheckerTest`、
+> `GalleryServiceStabilityTest`、`GalleryNotifierTest`）。

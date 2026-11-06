@@ -46,7 +46,9 @@ public class GalleryEndpoint implements CustomEndpoint {
             .route(RequestPredicates.GET("/items").and(RequestPredicates.accept(MediaType.APPLICATION_JSON)),
                 this::items)
             .andRoute(RequestPredicates.GET("/items"), this::items)
-            .andRoute(RequestPredicates.GET("/random"), this::random);
+            .andRoute(RequestPredicates.GET("/random"), this::random)
+            .andRoute(RequestPredicates.GET("/sources"), this::sources)
+            .andRoute(RequestPredicates.GET("/page-config"), this::pageConfig);
     }
 
     @Override
@@ -54,13 +56,15 @@ public class GalleryEndpoint implements CustomEndpoint {
         return GroupVersion.parseAPIVersion(GalleryAccessSetup.API_GROUP + "/v1alpha1");
     }
 
-    /** GET /items?source=&page=1&size=20 */
+    /** GET /items?source=&tag=&page=1&size=20 */
     private Mono<ServerResponse> items(ServerRequest request) {
         String source = param(request, "source", null);
-        int page = intParam(request, "page", 1);
-        int size = intParam(request, "size", 20);
+        String tag = param(request, "tag", null);
+        int page = Math.max(1, intParam(request, "page", 1));
+        // 单页上限 200：防止匿名请求用超大 size 一次拉走全量，放大内存与带宽消耗
+        int size = Math.max(1, Math.min(200, intParam(request, "size", 20)));
 
-        List<GalleryImageItem> matched = service.bySource(source);
+        List<GalleryImageItem> matched = service.filter(source, tag);
         int total = matched.size();
         int from = Math.max(0, (page - 1) * size);
         int to = Math.min(total, from + size);
@@ -91,6 +95,36 @@ public class GalleryEndpoint implements CustomEndpoint {
         GalleryImageItem one = pool.get(ThreadLocalRandom.current().nextInt(pool.size()));
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("item", one);
+        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(body);
+    }
+
+    /**
+     * GET /sources —— 前台数据源与标签筛选。
+     *
+     * <p>只返回名称、图片数、标签，不返回任何图源地址（apiUrl 属管理端信息）。
+     */
+    private Mono<ServerResponse> sources(ServerRequest request) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("items", service.publicSources());
+        body.put("tags", service.allTags());
+        body.put("total", service.count());
+        body.put("lastSync", service.getLastSync() == null ? null
+            : service.getLastSync().toString());
+        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(body);
+    }
+
+    /** GET /page-config —— 前台展示页的标题、副标题与每页数量等可配置项 */
+    private Mono<ServerResponse> pageConfig(ServerRequest request) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("title", service.displayText("pageTitle", "图库"));
+        body.put("subtitle",
+            service.displayText("pageSubtitle", "图片由第三方图源提供，不占用本站存储"));
+        body.put("footer", service.displayText("pageFooter", ""));
+        body.put("pageSize", service.intSetting(GalleryService.DISPLAY_KEY, "pageSize", 48, 1, 200));
+        body.put("showSource", service.boolSetting(GalleryService.DISPLAY_KEY, "showSource", true));
+        body.put("showTags", service.boolSetting(GalleryService.DISPLAY_KEY, "showTags", true));
+        body.put("enableDownload",
+            service.boolSetting(GalleryService.DISPLAY_KEY, "enableDownload", true));
         return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(body);
     }
 

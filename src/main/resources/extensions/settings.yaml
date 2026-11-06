@@ -113,6 +113,91 @@ spec:
           name: note
           label: 说明
           value: "图片仅缓存地址等元数据，不下载到本站，不占用存储。"
+    - group: stability
+      label: 稳定与巡检
+      formSchema:
+        - $formkit: switch
+          name: snapshotEnabled
+          label: 开启图库快照持久化
+          help: "每次同步后把图片元数据写入工作目录 plugins/api-gallery/snapshot.json。Halo 重启、升级核心或重载插件后先恢复快照，避免图库长时间空白。只存地址等元数据，不下载图片。"
+          value: true
+        - $formkit: switch
+          name: deadLinkCheckEnabled
+          label: 开启死链巡检
+          help: "按周期对第三方图片地址抽样探测（HEAD，必要时降级为 Range GET，不下载完整图片）。"
+          value: true
+        - $formkit: number
+          name: deadLinkCheckIntervalMinutes
+          label: 巡检周期（分钟）
+          help: "默认 60 分钟，最小 15 分钟。首次巡检在插件启动 10 分钟后执行。"
+          value: 60
+          min: 15
+        - $formkit: number
+          name: deadLinkSampleSize
+          label: 每个数据源抽样张数
+          help: "每轮从每个数据源随机抽取多少张探测，默认 20。随机抽样可长期覆盖全部图片，也避免对图源造成压力。"
+          value: 20
+          min: 1
+        - $formkit: number
+          name: deadLinkMaxFailures
+          label: 连续几次失效后剔除
+          help: "只有返回 404/410/403 才计为失效；超时、5xx、限流不计，防止误删。默认连续 3 次才剔除。"
+          value: 3
+          min: 1
+        - $formkit: switch
+          name: deadLinkAutoRemove
+          label: 自动剔除失效图片
+          help: "关闭后只统计不清理，可在管理接口 /stability 查看疑似死链数。被剔除的图片若图源恢复，后续同步会重新拉回。"
+          value: true
+        - $formkit: text
+          name: alertWebhookUrl
+          label: 失败告警 Webhook
+          help: "数据源连续同步失败时 POST JSON 到该地址（含 title/text/time 字段），可接企业微信、钉钉、Server 酱或自建服务。必须是公网 http/https 地址，留空则不告警。"
+        - $formkit: number
+          name: alertAfterFailures
+          label: 连续失败几次后告警
+          value: 3
+          min: 1
+        - $formkit: number
+          name: alertIntervalHours
+          label: 同一数据源告警间隔（小时）
+          help: "防止图源长期故障时反复刷屏，默认 6 小时内同一数据源只告警一次。"
+          value: 6
+          min: 1
+    - group: display
+      label: 前台展示
+      formSchema:
+        - $formkit: text
+          name: pageTitle
+          label: 展示页标题
+          help: "同时用于浏览器标题与页面 H1。"
+          value: "图库"
+        - $formkit: text
+          name: pageSubtitle
+          label: 副标题 / SEO 描述
+          value: "图片由第三方图源提供，不占用本站存储"
+        - $formkit: text
+          name: pageFooter
+          label: 页脚附加文字
+          help: "可填写素材来源说明或版权声明，留空则不显示。"
+        - $formkit: number
+          name: pageSize
+          label: 每页加载张数
+          value: 48
+          min: 1
+        - $formkit: switch
+          name: showSource
+          label: 显示数据来源
+          value: true
+        - $formkit: switch
+          name: showTags
+          label: 显示标签与标签筛选
+          value: true
+        - $formkit: switch
+          name: enableDownload
+          label: 允许打开原图
+          help: "关闭后灯箱里不显示「打开原图」按钮。跨域图片由浏览器自行另存为。"
+          value: true
     - group: about
       label: 关于
       formSchema:
