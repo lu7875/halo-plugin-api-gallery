@@ -38,10 +38,21 @@
   （`/page-config`、`/sources` 不可用时使用默认配置与来源推导）。
 - 未注入 Spring 环境时（如单元测试）自动退化为纯内存缓存，原有 53 个测试全部保持通过。
 
+### 修复
+
+- **快照存储的 Spring 装配失败**：`GallerySnapshotStore` 同时存在「生产 Environment 构造器」与
+  「测试 Path 构造器」，多构造器且未标注 `@Autowired` 时 Spring 会去找不存在的无参构造器，
+  导致插件启动即 `FAILED`（`No default constructor found`）。已为生产构造器显式标注 `@Autowired`，
+  并新增 `GallerySnapshotStoreWiringTest` 用最小 Spring 上下文验证 Bean 可创建，把装配问题挡在构建期。
+  纯单元测试无法覆盖此类问题，本次为实机部署时发现并修复。
+
 ### 测试
 
-- 新增 23 个用例：`GallerySnapshotStoreTest`（6）、`GalleryDeadLinkCheckerTest`（7）、
-  `GalleryServiceStabilityTest`（6）、`GalleryNotifierTest`（4）。全量 **76 个测试**通过。
+- 新增 24 个用例：`GallerySnapshotStoreTest`（6）、`GalleryDeadLinkCheckerTest`（7）、
+  `GalleryServiceStabilityTest`（6）、`GalleryNotifierTest`（4）、`GallerySnapshotStoreWiringTest`（1）。
+  全量 **77 个测试**通过。
+- 实机验证：Halo 2.27.1 上升級后，停用再启用插件，日志确认
+  「已从快照恢复 85 条图库元数据」，公开接口在后台同步完成前即恢复数据。
 
 ---
 

@@ -312,7 +312,7 @@ src/main/resources/
 gradle test
 ```
 
-76 个用例，全部通过：
+77 个用例，全部通过：
 
 | 类 | 用例数 | 覆盖内容 |
 |---|---|---|
@@ -325,6 +325,7 @@ gradle test
 | `GalleryDeadLinkCheckerTest` | 7 | 200 判存活、404/403 判失效、**500 与连接失败判 UNKNOWN 不误删**、HEAD 405 自动降级 Range GET、非法地址拦截 |
 | `GalleryServiceStabilityTest` | 6 | 快照恢复后筛选与公开源列表（断言不含 apiUrl）、只恢复一次、连续 3 次 404 才剔除且保留正常图、5xx 永不剔除、剔除后同步重写快照 |
 | `GalleryNotifierTest` | 4 | Webhook JSON 内容、非 2xx 返回失败、内网地址拦截、空地址忽略 |
+| `GallerySnapshotStoreWiringTest` | 1 | 用最小 Spring 上下文验证快照存储能被真正装配，防止「多构造器未标注 @Autowired」导致插件启动失败（1.5.0 实机部署时发现并修复） |
 
 其中 `GalleryServiceFetchTest` 与 `GalleryServiceRedirectSafetyTest` 全程只产生内存对象，不落任何本地文件。
 
